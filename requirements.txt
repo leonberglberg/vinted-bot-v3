@@ -1,3 +1,6 @@
 vinted-scraper>=5.2.0
 gspread>=6.0
 google-auth>=2.29
+gspread
+google-auth
+vinted-scraper
