@@ -33,9 +33,9 @@ STATUS_IDS = [6, 1, 2, 3]
 BRANDS = [
     "Nike", "Adidas", "Carhartt", "Ralph Lauren", "Lacoste", "Levi's",
     "The North Face", "Tommy Hilfiger", "Champion", "Stüssy", "Dickies",
-    "Patagonia", "Fila", "Puma", "Jordan", "Calvin Klein",
+    "Patagonia", "Fila", "Puma", "Jordan", "Calvin Klein", "Gertrude", "Under armour"
 ]
-SIZES = {"S", "M", "L"}  # filtre de taille pour les vêtements uniquement
+SIZES = {"S", "M", "L", "XL"}  # filtre de taille pour les vêtements uniquement
  
 ELECTRONICS = [
     "écouteurs", "airpods", "enceinte bluetooth", "manette", "casque audio",
