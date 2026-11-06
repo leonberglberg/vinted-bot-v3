@@ -8,8 +8,8 @@ Usage :
   python vinted_bot.py --loop
 
 Variables d'environnement :
-  GOOGLE_CREDS : contenu JSON du compte de service Google
-  SHEET_ID     : identifiant du Google Sheets
+  GOOGLE_CREDS : JSON du compte de service Google
+  SHEET_ID     : identifiant Google Sheets
 """
 
 import json
@@ -17,11 +17,8 @@ import os
 import random
 import sys
 import time
-import re
-import unicodedata
-
-from urllib.parse import urljoin, urlparse
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 
 import gspread
 from vinted_scraper import VintedWrapper
@@ -76,18 +73,12 @@ SEARCHES = (
     ]
     +
     [
-        {
-            "cat": "Électronique",
-            "text": k
-        }
+        {"cat": "Électronique", "text": k}
         for k in ELECTRONICS
     ]
     +
     [
-        {
-            "cat": "Accessoires",
-            "text": k
-        }
+        {"cat": "Accessoires", "text": k}
         for k in ACCESSORIES
     ]
 )
@@ -105,12 +96,6 @@ HEADERS = [
     "Photo"
 ]
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0 Safari/537.36"
-)
-
 
 def log(msg):
     print(
@@ -124,7 +109,6 @@ def log(msg):
 # ----------------------------------------------------------------------------
 
 def make_session():
-
     return VintedWrapper(BASE)
 
 
@@ -152,49 +136,80 @@ def fetch_items(session, text):
         else (data or [])
     )
 
+    # Diagnostic complet de la première annonce
     if not _first_call_logged:
 
         _first_call_logged = True
 
-        top = (
-            list(data.keys())
-            if isinstance(data, dict)
-            else type(data).__name__
+        log("========== DIAGNOSTIC VINTED ==========")
+
+        log(
+            f"Type de réponse : {type(data).__name__}"
         )
 
-        log(f"Diagnostic : réponse = {top}")
-        log(f"Diagnostic : {len(items)} annonce(s)")
+        log(
+            f"Nombre d'annonces : {len(items)}"
+        )
 
-        if items and isinstance(items[0], dict):
+        if items:
 
             log(
-                "Diagnostic : champs d'une annonce = "
-                f"{sorted(items[0].keys())}"
+                "DONNEES COMPLETES DE LA PREMIERE ANNONCE :"
             )
+
+            try:
+                print(
+                    json.dumps(
+                        items[0],
+                        indent=4,
+                        ensure_ascii=False,
+                        default=str
+                    ),
+                    flush=True
+                )
+
+            except Exception as e:
+                log(f"Impossible d'afficher les données : {e}")
+
+        log("=======================================")
 
     return items
 
 
 # ----------------------------------------------------------------------------
-# CORRECTION DES LIENS VINTED
+# RECUPERATION DU LIEN DIRECT
 # ----------------------------------------------------------------------------
 
 def get_item_url(item):
 
-    """
-    Récupère le véritable lien de l'annonce.
+    item_id = item.get("id")
 
-    Priorité :
-    1. URL fournie directement par Vinted.
-    2. URL de secours construite avec ID et titre.
-    """
+    if not item_id:
+        return ""
 
+    # Champs pouvant contenir le véritable lien
     possible_urls = [
         item.get("url"),
         item.get("item_url"),
         item.get("share_url"),
+        item.get("canonical_url"),
         item.get("path"),
     ]
+
+    # Certains objets peuvent contenir un lien dans un objet imbriqué
+    for key in ("item", "share", "links"):
+
+        nested = item.get(key)
+
+        if isinstance(nested, dict):
+
+            possible_urls.extend([
+                nested.get("url"),
+                nested.get("item_url"),
+                nested.get("share_url"),
+                nested.get("canonical_url"),
+                nested.get("path"),
+            ])
 
     for candidate in possible_urls:
 
@@ -224,40 +239,19 @@ def get_item_url(item):
             and "/items/" in parsed.path
         ):
 
-            return candidate
+            # Vérification que le lien correspond à l'annonce
+            if str(item_id) in parsed.path.split("/")[-1]:
+                return candidate
 
-    # Construction du lien de secours
-
-    item_id = item.get("id")
-
-    title = item.get("title", "")
-
-    if not item_id:
-        return ""
-
-    slug = unicodedata.normalize(
-        "NFKD",
-        str(title)
+    log(
+        f"Aucun lien direct exploitable pour l'annonce {item_id}"
     )
 
-    slug = slug.encode(
-        "ascii",
-        "ignore"
-    ).decode("ascii")
-
-    slug = re.sub(
-        r"[^a-zA-Z0-9]+",
-        "-",
-        slug
-    )
-
-    slug = slug.strip("-").lower()
-
-    return f"{BASE}/items/{item_id}-{slug}"
+    return ""
 
 
 # ----------------------------------------------------------------------------
-# PRIX / TEXTE / ÉTAT / TAILLE
+# DONNEES DES ANNONCES
 # ----------------------------------------------------------------------------
 
 def price_of(item):
@@ -375,11 +369,9 @@ def get_photo_url(item):
     photo = item.get("photo") or {}
 
     if isinstance(photo, dict):
-
         return photo.get("url", "")
 
     if isinstance(photo, str):
-
         return photo
 
     return ""
@@ -412,7 +404,6 @@ def open_spreadsheet():
 def get_worksheet(sh, name):
 
     try:
-
         ws = sh.worksheet(name)
 
     except gspread.WorksheetNotFound:
@@ -425,11 +416,7 @@ def get_worksheet(sh, name):
 
     if not ws.row_values(1):
 
-        ws.update(
-            "A1",
-            [HEADERS]
-        )
-
+        ws.update("A1", [HEADERS])
         ws.freeze(rows=1)
 
     return ws
@@ -453,10 +440,7 @@ def run_once():
     known = set()
 
     for ws in sheets.values():
-
-        known.update(
-            ws.col_values(1)[1:]
-        )
+        known.update(ws.col_values(1)[1:])
 
     session = make_session()
 
@@ -496,16 +480,11 @@ def run_once():
             if errors == 2:
 
                 try:
-
                     session = make_session()
-
                     log("Nouvelle session Vinted créée")
 
                 except Exception as e2:
-
-                    log(
-                        f"Impossible de recréer la session : {e2}"
-                    )
+                    log(f"Erreur de session : {e2}")
 
             if errors >= 5:
 
@@ -526,31 +505,22 @@ def run_once():
                 not iid
                 or iid in known
                 or iid in seen_now
-                or not keep(it, search)
             ):
+                continue
 
+            if not keep(it, search):
+                continue
+
+            # Récupération obligatoire du lien direct
+            link = get_item_url(it)
+
+            # Pas d'ajout sans lien direct
+            if not link:
                 continue
 
             seen_now.add(iid)
 
-            # Récupération du lien corrigée
-
-            link = get_item_url(it)
-
-            if not link:
-
-                log(
-                    f"Attention : aucun lien trouvé "
-                    f"pour l'annonce {iid}"
-                )
-
-            else:
-
-                log(
-                    f"Lien récupéré : {link}"
-                )
-
-            # Récupération de la photo
+            log(f"Lien direct récupéré : {link}")
 
             photo = get_photo_url(it)
 
@@ -559,8 +529,6 @@ def run_once():
                 if photo
                 else ""
             )
-
-            # Ajout dans Google Sheets
 
             new_rows[search["cat"]].append([
 
@@ -593,13 +561,10 @@ def run_once():
             ])
 
         time.sleep(
-            random.uniform(
-                *PAUSE_BETWEEN_SEARCHES
-            )
+            random.uniform(*PAUSE_BETWEEN_SEARCHES)
         )
 
-    # Enregistrement des annonces
-
+    # Enregistrement Google Sheets
     total = 0
 
     for cat, rows in new_rows.items():
@@ -644,7 +609,6 @@ if __name__ == "__main__":
         while True:
 
             try:
-
                 run_once()
 
             except Exception as e:
