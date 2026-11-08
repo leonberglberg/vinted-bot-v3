@@ -8,8 +8,8 @@ Usage :
   python vinted_bot.py --loop
 
 Variables d'environnement :
-  GOOGLE_CREDS : JSON du compte de service Google
-  SHEET_ID     : identifiant Google Sheets
+  GOOGLE_CREDS : contenu JSON du compte de service Google
+  SHEET_ID     : identifiant du Google Sheets
 """
 
 import json
@@ -17,7 +17,7 @@ import os
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 
 import gspread
@@ -33,6 +33,10 @@ BASE = "https://www.vinted.fr"
 
 MAX_PRICE = 20
 
+# 6 = neuf avec étiquette
+# 1 = neuf sans étiquette
+# 2 = très bon état
+# 3 = bon état
 STATUS_IDS = [6, 1, 2, 3]
 
 BRANDS = [
@@ -55,10 +59,18 @@ ACCESSORIES = [
     "casquette", "bonnet", "bob", "écharpe"
 ]
 
+# Nettoyage des annonces après 72 heures
+ANNOUNCEMENT_MAX_AGE_HOURS = 72
+
+# Mode continu : 10 minutes entre deux passages
 LOOP_INTERVAL_SECONDS = 600
 
+# Pause entre les recherches
 PAUSE_BETWEEN_SEARCHES = (2.0, 5.0)
 
+
+# ----------------------------------------------------------------------------
+# RECHERCHES
 # ----------------------------------------------------------------------------
 
 SEARCHES = (
@@ -73,12 +85,18 @@ SEARCHES = (
     ]
     +
     [
-        {"cat": "Électronique", "text": k}
+        {
+            "cat": "Électronique",
+            "text": k
+        }
         for k in ELECTRONICS
     ]
     +
     [
-        {"cat": "Accessoires", "text": k}
+        {
+            "cat": "Accessoires",
+            "text": k
+        }
         for k in ACCESSORIES
     ]
 )
@@ -136,28 +154,22 @@ def fetch_items(session, text):
         else (data or [])
     )
 
-    # Diagnostic complet de la première annonce
+    # Diagnostic de la première annonce
     if not _first_call_logged:
 
         _first_call_logged = True
 
         log("========== DIAGNOSTIC VINTED ==========")
 
-        log(
-            f"Type de réponse : {type(data).__name__}"
-        )
-
-        log(
-            f"Nombre d'annonces : {len(items)}"
-        )
+        log(f"Type de réponse : {type(data).__name__}")
+        log(f"Nombre d'annonces : {len(items)}")
 
         if items:
 
-            log(
-                "DONNEES COMPLETES DE LA PREMIERE ANNONCE :"
-            )
+            log("DONNEES COMPLETES DE LA PREMIERE ANNONCE :")
 
             try:
+
                 print(
                     json.dumps(
                         items[0],
@@ -169,7 +181,8 @@ def fetch_items(session, text):
                 )
 
             except Exception as e:
-                log(f"Impossible d'afficher les données : {e}")
+
+                log(f"Diagnostic impossible : {e}")
 
         log("=======================================")
 
@@ -177,17 +190,21 @@ def fetch_items(session, text):
 
 
 # ----------------------------------------------------------------------------
-# RECUPERATION DU LIEN DIRECT
+# RECUPERATION DU LIEN DIRECT VINTED
 # ----------------------------------------------------------------------------
 
 def get_item_url(item):
+
+    """
+    Récupère uniquement un lien direct fourni par Vinted.
+    Aucun lien de recherche ou lien artificiellement construit.
+    """
 
     item_id = item.get("id")
 
     if not item_id:
         return ""
 
-    # Champs pouvant contenir le véritable lien
     possible_urls = [
         item.get("url"),
         item.get("item_url"),
@@ -196,7 +213,7 @@ def get_item_url(item):
         item.get("path"),
     ]
 
-    # Certains objets peuvent contenir un lien dans un objet imbriqué
+    # Recherche éventuelle dans les objets imbriqués
     for key in ("item", "share", "links"):
 
         nested = item.get(key)
@@ -229,7 +246,7 @@ def get_item_url(item):
 
         parsed = urlparse(candidate)
 
-        if (
+        if not (
             parsed.scheme in ("http", "https")
             and parsed.hostname
             and (
@@ -238,10 +255,18 @@ def get_item_url(item):
             )
             and "/items/" in parsed.path
         ):
+            continue
 
-            # Vérification que le lien correspond à l'annonce
-            if str(item_id) in parsed.path.split("/")[-1]:
-                return candidate
+        # Vérification de l'identifiant de l'annonce
+        path_parts = parsed.path.rstrip("/").split("/")
+
+        if any(
+            part.startswith(str(item_id))
+            for part in path_parts
+            if part.isdigit() or part.startswith(str(item_id))
+        ):
+
+            return candidate
 
     log(
         f"Aucun lien direct exploitable pour l'annonce {item_id}"
@@ -251,7 +276,7 @@ def get_item_url(item):
 
 
 # ----------------------------------------------------------------------------
-# DONNEES DES ANNONCES
+# PRIX / TEXTE / ETAT / TAILLE
 # ----------------------------------------------------------------------------
 
 def price_of(item):
@@ -404,6 +429,7 @@ def open_spreadsheet():
 def get_worksheet(sh, name):
 
     try:
+
         ws = sh.worksheet(name)
 
     except gspread.WorksheetNotFound:
@@ -423,6 +449,83 @@ def get_worksheet(sh, name):
 
 
 # ----------------------------------------------------------------------------
+# SUPPRESSION AUTOMATIQUE DES ANNONCES DE PLUS DE 3 JOURS
+# ----------------------------------------------------------------------------
+
+def delete_old_announcements(sheets):
+
+    """
+    Supprime les annonces détectées depuis plus de 72 heures.
+
+    Colonne A : ID
+    Colonne B : date de détection
+
+    La première ligne contenant les titres est conservée.
+    """
+
+    now = datetime.now()
+
+    limit = now - timedelta(
+        hours=ANNOUNCEMENT_MAX_AGE_HOURS
+    )
+
+    total_deleted = 0
+
+    log("Début du nettoyage des anciennes annonces")
+
+    for category, ws in sheets.items():
+
+        rows = ws.get_all_values()
+
+        rows_to_delete = []
+
+        # On commence à la ligne 2
+        for row_number, row in enumerate(
+            rows[1:],
+            start=2
+        ):
+
+            if len(row) < 2 or not row[1].strip():
+                continue
+
+            try:
+
+                detected_date = datetime.strptime(
+                    row[1].strip(),
+                    "%Y-%m-%d %H:%M"
+                )
+
+                if detected_date < limit:
+
+                    rows_to_delete.append(row_number)
+
+            except ValueError:
+
+                log(
+                    f"Date invalide dans {category}, "
+                    f"ligne {row_number} : {row[1]}"
+                )
+
+        # Suppression de bas en haut
+        for row_number in reversed(rows_to_delete):
+
+            ws.delete_rows(row_number)
+
+            total_deleted += 1
+
+        if rows_to_delete:
+
+            log(
+                f"{len(rows_to_delete)} annonce(s) supprimée(s) "
+                f"dans {category}"
+            )
+
+    log(
+        f"Nettoyage terminé : {total_deleted} annonce(s) supprimée(s)"
+    )
+
+
+# ----------------------------------------------------------------------------
 # PASSAGE PRINCIPAL
 # ----------------------------------------------------------------------------
 
@@ -437,10 +540,18 @@ def run_once():
         for c in {s["cat"] for s in SEARCHES}
     }
 
+    # 1. Nettoyage automatique des annonces de plus de 72 heures
+    delete_old_announcements(sheets)
+
+    # 2. Récupération des identifiants déjà présents
     known = set()
 
     for ws in sheets.values():
-        known.update(ws.col_values(1)[1:])
+
+        known.update(
+            str(value)
+            for value in ws.col_values(1)[1:]
+        )
 
     session = make_session()
 
@@ -457,6 +568,7 @@ def run_once():
 
     errors = 0
 
+    # 3. Recherches Vinted
     for search in SEARCHES:
 
         try:
@@ -480,11 +592,16 @@ def run_once():
             if errors == 2:
 
                 try:
+
                     session = make_session()
+
                     log("Nouvelle session Vinted créée")
 
                 except Exception as e2:
-                    log(f"Erreur de session : {e2}")
+
+                    log(
+                        f"Impossible de recréer la session : {e2}"
+                    )
 
             if errors >= 5:
 
@@ -497,6 +614,7 @@ def run_once():
 
             continue
 
+        # 4. Analyse des annonces
         for it in items:
 
             iid = str(it.get("id", ""))
@@ -514,14 +632,18 @@ def run_once():
             # Récupération obligatoire du lien direct
             link = get_item_url(it)
 
-            # Pas d'ajout sans lien direct
+            # Pas d'ajout si le lien direct est absent
             if not link:
+
                 continue
 
             seen_now.add(iid)
 
-            log(f"Lien direct récupéré : {link}")
+            log(
+                f"Lien direct récupéré : {link}"
+            )
 
+            # Récupération de la photo
             photo = get_photo_url(it)
 
             photo_formula = (
@@ -530,6 +652,7 @@ def run_once():
                 else ""
             )
 
+            # Préparation de la ligne
             new_rows[search["cat"]].append([
 
                 iid,
@@ -561,10 +684,12 @@ def run_once():
             ])
 
         time.sleep(
-            random.uniform(*PAUSE_BETWEEN_SEARCHES)
+            random.uniform(
+                *PAUSE_BETWEEN_SEARCHES
+            )
         )
 
-    # Enregistrement Google Sheets
+    # 5. Enregistrement dans Google Sheets
     total = 0
 
     for cat, rows in new_rows.items():
@@ -609,6 +734,7 @@ if __name__ == "__main__":
         while True:
 
             try:
+
                 run_once()
 
             except Exception as e:
